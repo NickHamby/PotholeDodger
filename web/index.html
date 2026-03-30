@@ -696,10 +696,7 @@
               `&viewbox=${AC_VIEWBOX}&q=${encodeURIComponent(q)}`;
             const res = await fetch(url, {
               signal,
-              headers: {
-                'Accept-Language': 'en',
-                'User-Agent': 'PotholeDodger/1.0 (Richmond VA routing web app)'
-              }
+              headers: { 'Accept-Language': 'en' }
             });
             if (!res.ok) return;
             const data = await res.json();
@@ -781,12 +778,9 @@
       const latLng = address.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
       if (latLng) return { lat: parseFloat(latLng[1]), lng: parseFloat(latLng[2]) };
 
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&viewbox=-77.6,37.4,-77.3,37.65&bounded=0&q=${encodeURIComponent(address)}`;
       const res = await fetch(url, {
-        headers: {
-          'Accept-Language': 'en',
-          'User-Agent': 'PotholeDodger/1.0 (Richmond VA routing web app)'
-        }
+        headers: { 'Accept-Language': 'en' }
       });
       if (!res.ok) throw new Error(`Geocoding request failed (${res.status})`);
       const data = await res.json();
