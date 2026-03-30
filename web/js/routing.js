@@ -16,13 +16,18 @@ export function buildMapsUrl(origin, dest, waypoints) {
 // ── OSRM route stats ──────────────────────────────────────────────────────────
 export async function fetchOsrmRoute(coordPairs) {
   // coordPairs: array of [lng, lat]
-  const coordStr = coordPairs.map(([lng, lat]) => `${lng},${lat}`).join(';');
-  const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=false&steps=false`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`OSRM request failed (${res.status})`);
-  const data = await res.json();
-  if (!data.routes || !data.routes.length) throw new Error('No OSRM route found');
-  return { duration: data.routes[0].duration, distance: data.routes[0].distance };
+  // Returns null on any network or server failure (best-effort enhancement).
+  try {
+    const coordStr = coordPairs.map(([lng, lat]) => `${lng},${lat}`).join(';');
+    const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=false&steps=false`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.routes || !data.routes.length) return null;
+    return { duration: data.routes[0].duration, distance: data.routes[0].distance };
+  } catch {
+    return null;
+  }
 }
 
 export function formatDuration(seconds) {
