@@ -529,52 +529,54 @@
     }
 
     // ── Waypoint selection ────────────────────────────────────────────────────
-    const CORRIDOR_HALF = 0.018; // ~2 km latitude / ~1.6 km longitude at 37.5°N
-    const T_MIN = 0.05;
-    const T_MAX = 0.95;
-    const MAX_WAYPOINTS = 9;
-    const DETOUR_PUSH = 0.012; // ~1.3 km latitude / ~1.1 km longitude at 37.5°N
+    const CORRIDOR_HALF  = 0.010;  // ~1.1 km — tighter corridor
+    const T_MIN          = 0.05;
+    const T_MAX          = 0.95;
+    const MAX_WAYPOINTS  = 3;       // never more than 3
+    const DETOUR_PUSH    = 0.004;   // ~440 m nudge, not a yank
+    const MIN_DENSITY    = 5;       // ignore sparse clusters
+    const T_GAP          = 0.08;    // min t-spacing between waypoints
 
     function selectWaypoints(origin, dest, clusters) {
       const dLat = dest.lat - origin.lat;
       const dLng = dest.lng - origin.lng;
       const routeLen2 = dLat * dLat + dLng * dLng;
+      const routeLen  = Math.sqrt(routeLen2);
 
-      const qualifying = [];
+      // clusters already sorted by density descending from buildClusters()
+      const accepted = [];
+
       for (const cluster of clusters) {
+        if (accepted.length >= MAX_WAYPOINTS) break;
+        if (cluster.count < MIN_DENSITY) break; // sorted desc, so we can break early
+
         const cLat = cluster.lat - origin.lat;
         const cLng = cluster.lng - origin.lng;
 
-        // Scalar projection t ∈ [0,1] along route vector
         const t = (cLat * dLat + cLng * dLng) / routeLen2;
         if (t < T_MIN || t > T_MAX) continue;
 
-        // Perpendicular distance (signed, using 2D cross product)
-        // cross = dLat * cLng - dLng * cLat  (z-component)
-        const cross = dLat * cLng - dLng * cLat;
-        const routeLen = Math.sqrt(routeLen2);
-        const perpDist = cross / routeLen; // signed distance
+        const cross      = dLat * cLng - dLng * cLat;
+        const perpDist   = cross / routeLen;
         const absPerpDist = Math.abs(perpDist);
-
         if (absPerpDist > CORRIDOR_HALF) continue;
 
-        // Detour anchor: interpolated point on route at t, pushed AWAY from cluster
-        // perpUnit = (-dLng, dLat) / routeLen  (left normal)
-        // sign: if perpDist > 0 cluster is to the left, push right (opposite)
-        const sign = perpDist >= 0 ? -1 : 1;
+        // Skip if too close in t to an already-accepted waypoint
+        if (accepted.some(a => Math.abs(a.t - t) < T_GAP)) continue;
+
+        const sign        = perpDist >= 0 ? -1 : 1;
         const perpUnitLat = -dLng / routeLen;
         const perpUnitLng =  dLat / routeLen;
 
         const anchorLat = origin.lat + t * dLat + sign * DETOUR_PUSH * perpUnitLat;
         const anchorLng = origin.lng + t * dLng + sign * DETOUR_PUSH * perpUnitLng;
 
-        qualifying.push({ t, anchorLat, anchorLng, count: cluster.count });
-        if (qualifying.length >= MAX_WAYPOINTS) break;
+        accepted.push({ t, anchorLat, anchorLng, count: cluster.count });
       }
 
-      // Sort by t (route order)
-      qualifying.sort((a, b) => a.t - b.t);
-      return qualifying;
+      // Sort accepted by t so waypoints are in route order
+      accepted.sort((a, b) => a.t - b.t);
+      return accepted;
     }
 
     // ── Build Google Maps URL ─────────────────────────────────────────────────
