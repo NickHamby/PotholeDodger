@@ -80,10 +80,19 @@ goBtn.addEventListener('click', async () => {
   setStatus('<span class="spinner"></span>Geocoding addresses…', '');
 
   try {
-    const [origin, dest] = await Promise.all([
-      geocode(originAddr),
-      geocode(destAddr)
-    ]);
+    let origin, dest;
+    try {
+      origin = await geocode(originAddr);
+    } catch {
+      setStatus('Could not find origin address — try being more specific.', 'error');
+      return;
+    }
+    try {
+      dest = await geocode(destAddr);
+    } catch {
+      setStatus('Could not find destination address — try being more specific.', 'error');
+      return;
+    }
 
     setStatus('<span class="spinner"></span>Computing route…', '');
 
@@ -95,7 +104,7 @@ goBtn.addEventListener('click', async () => {
 
     setStatus('<span class="spinner"></span>Fetching route stats…', '');
 
-    // Fetch direct and dodging route stats from OSRM in parallel
+    // Fetch direct and dodging route stats from OSRM in parallel (best-effort)
     const directCoords = [[origin.lng, origin.lat], [dest.lng, dest.lat]];
     const dodgeCoords  = waypoints.length
       ? [
@@ -110,22 +119,29 @@ goBtn.addEventListener('click', async () => {
       fetchOsrmRoute(dodgeCoords)
     ]);
 
-    // Populate preview panel
-    directStatsEl.textContent = `${formatDuration(directStats.duration)} · ${formatDistance(directStats.distance)}`;
-    dodgeStatsEl.textContent  = `${formatDuration(dodgeStats.duration)} · ${formatDistance(dodgeStats.distance)}`;
+    // Populate preview panel — handle unavailable OSRM stats gracefully
+    if (directStats && dodgeStats) {
+      directStatsEl.textContent = `${formatDuration(directStats.duration)} · ${formatDistance(directStats.distance)}`;
+      dodgeStatsEl.textContent  = `${formatDuration(dodgeStats.duration)} · ${formatDistance(dodgeStats.distance)}`;
 
-    const extraSec  = dodgeStats.duration - directStats.duration;
-    const extraPct  = directStats.duration > 0 ? extraSec / directStats.duration : 0;
+      const extraSec  = dodgeStats.duration - directStats.duration;
+      const extraPct  = directStats.duration > 0 ? extraSec / directStats.duration : 0;
 
-    if (!waypoints.length) {
-      recommendationEl.textContent = 'No hazard clusters found — route is already clear';
-      recommendationEl.className   = 'preview-recommendation green';
-    } else if (extraSec > MAX_ACCEPTABLE_DETOUR_SECONDS || extraPct > MAX_ACCEPTABLE_DETOUR_PERCENTAGE) {
-      recommendationEl.textContent = `This detour adds ${formatDuration(extraSec)} — consider taking the direct route`;
-      recommendationEl.className   = 'preview-recommendation yellow';
+      if (!waypoints.length) {
+        recommendationEl.textContent = 'No hazard clusters found — route is already clear';
+        recommendationEl.className   = 'preview-recommendation green';
+      } else if (extraSec > MAX_ACCEPTABLE_DETOUR_SECONDS || extraPct > MAX_ACCEPTABLE_DETOUR_PERCENTAGE) {
+        recommendationEl.textContent = `This detour adds ${formatDuration(extraSec)} — consider taking the direct route`;
+        recommendationEl.className   = 'preview-recommendation yellow';
+      } else {
+        recommendationEl.textContent = `Detour adds only ${formatDuration(extraSec)} to avoid ${waypoints.length} pothole cluster${waypoints.length > 1 ? 's' : ''}`;
+        recommendationEl.className   = 'preview-recommendation green';
+      }
     } else {
-      recommendationEl.textContent = `Detour adds only ${formatDuration(extraSec)} to avoid ${waypoints.length} pothole cluster${waypoints.length > 1 ? 's' : ''}`;
-      recommendationEl.className   = 'preview-recommendation green';
+      directStatsEl.textContent = 'Route stats unavailable';
+      dodgeStatsEl.textContent  = 'Route stats unavailable';
+      recommendationEl.textContent = 'Stats unavailable — open Google Maps to compare';
+      recommendationEl.className   = 'preview-recommendation';
     }
 
     dodgeBtnEl.href  = dodgeMapsUrl;
