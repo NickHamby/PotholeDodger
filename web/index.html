@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pothole Dodger — Richmond, VA</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -277,6 +281,14 @@
       text-align: center;
       padding: 0.75rem 1rem;
     }
+
+    #hazard-map {
+      display: none;
+      height: 260px;
+      width: 100%;
+      border-radius: 0.5rem;
+      margin-top: 1rem;
+    }
   </style>
 </head>
 <body>
@@ -305,6 +317,8 @@
     <button class="btn-go" id="goBtn">Get Pothole-Dodging Route</button>
 
     <div class="status" id="status"></div>
+
+    <div id="hazard-map"></div>
 
     <div class="preview-panel" id="previewPanel">
       <div class="preview-row">
@@ -819,25 +833,35 @@
       const routeLen  = Math.sqrt(routeLen2);
 
       // clusters already sorted by density descending from buildClusters()
-      const accepted = [];
+      const accepted        = [];
+      const dodgedClusters  = []; // clusters that produced waypoints
+      const skipped         = []; // in corridor but filtered out
 
       for (const cluster of clusters) {
-        if (accepted.length >= MAX_WAYPOINTS) break;
-        if (cluster.count < MIN_DENSITY) break; // sorted desc, so we can break early
-
         const cLat = cluster.lat - origin.lat;
         const cLng = cluster.lng - origin.lng;
 
         const t = (cLat * dLat + cLng * dLng) / routeLen2;
         if (t < T_MIN || t > T_MAX) continue;
 
-        const cross      = dLat * cLng - dLng * cLat;
-        const perpDist   = cross / routeLen;
+        const cross       = dLat * cLng - dLng * cLat;
+        const perpDist    = cross / routeLen;
         const absPerpDist = Math.abs(perpDist);
         if (absPerpDist > CORRIDOR_HALF) continue;
 
+        // Cluster is in the corridor — now check filter conditions
+        // Note: we intentionally do not break on MIN_DENSITY because clusters below the
+        // threshold are still collected as "skipped" for the hazard map visualisation.
+        if (accepted.length >= MAX_WAYPOINTS || cluster.count < MIN_DENSITY) {
+          skipped.push(cluster);
+          continue;
+        }
+
         // Skip if too close in t to an already-accepted waypoint
-        if (accepted.some(a => Math.abs(a.t - t) < T_GAP)) continue;
+        if (accepted.some(a => Math.abs(a.t - t) < T_GAP)) {
+          skipped.push(cluster);
+          continue;
+        }
 
         const sign        = perpDist >= 0 ? -1 : 1;
         const perpUnitLat = -dLng / routeLen;
@@ -847,11 +871,12 @@
         const anchorLng = origin.lng + t * dLng + sign * DETOUR_PUSH * perpUnitLng;
 
         accepted.push({ t, anchorLat, anchorLng, count: cluster.count });
+        dodgedClusters.push(cluster);
       }
 
       // Sort accepted by t so waypoints are in route order
       accepted.sort((a, b) => a.t - b.t);
-      return accepted;
+      return { waypoints: accepted, dodgedClusters, skippedClusters: skipped };
     }
 
     // ── Build Google Maps URL ─────────────────────────────────────────────────
@@ -919,7 +944,7 @@
         setStatus('<span class="spinner"></span>Computing route…', '');
 
         const clusters  = buildClusters();
-        const waypoints = selectWaypoints(origin, dest, clusters);
+        const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, clusters);
 
         const dodgeMapsUrl   = buildMapsUrl(origin, dest, waypoints);
         const directMapsUrl  = buildMapsUrl(origin, dest, []);
@@ -964,12 +989,85 @@
 
         setStatus('', '');
         previewPanel.classList.add('visible');
+        renderHazardMap(origin, dest, waypoints, dodgedClusters, skippedClusters);
       } catch (err) {
         setStatus(`Error: ${err.message}`, 'error');
       } finally {
         goBtn.disabled = false;
       }
     });
+
+    // ── Hazard map ────────────────────────────────────────────────────────────
+    let mapInstance = null;
+
+    function renderHazardMap(origin, dest, waypoints, dodgedClusters, skippedClusters) {
+      const mapDiv = document.getElementById('hazard-map');
+
+      // Destroy existing map instance to prevent "already initialized" error
+      if (mapInstance) {
+        mapInstance.remove();
+        mapInstance = null;
+      }
+
+      // Show the map container
+      mapDiv.style.display = 'block';
+
+      mapInstance = L.map('hazard-map');
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(mapInstance);
+
+      const boundsPoints = [];
+
+      // Straight-line path (dashed blue polyline)
+      L.polyline(
+        [[origin.lat, origin.lng], [dest.lat, dest.lng]],
+        { color: '#3b82f6', weight: 2, dashArray: '6,6', opacity: 0.8 }
+      ).addTo(mapInstance);
+      boundsPoints.push([origin.lat, origin.lng], [dest.lat, dest.lng]);
+
+      // Origin / destination markers
+      L.marker([origin.lat, origin.lng]).addTo(mapInstance)
+        .bindTooltip('Origin', { permanent: false });
+      L.marker([dest.lat, dest.lng]).addTo(mapInstance)
+        .bindTooltip('Destination', { permanent: false });
+
+      // Skipped clusters (grey)
+      for (const c of skippedClusters) {
+        L.circleMarker([c.lat, c.lng], {
+          radius: 7, fillColor: '#64748b', color: '#fff', weight: 1, fillOpacity: 0.6
+        }).addTo(mapInstance)
+          .bindTooltip(`Cluster: ${c.count} hazards — not on this route`, { permanent: false });
+        boundsPoints.push([c.lat, c.lng]);
+      }
+
+      // Dodged clusters (red)
+      for (const c of dodgedClusters) {
+        L.circleMarker([c.lat, c.lng], {
+          radius: 10, fillColor: '#ef4444', color: '#fff', weight: 1.5, fillOpacity: 0.8
+        }).addTo(mapInstance)
+          .bindTooltip(`Cluster: ${c.count} hazards — being dodged`, { permanent: false });
+        boundsPoints.push([c.lat, c.lng]);
+      }
+
+      // Waypoint anchors (blue)
+      for (const w of waypoints) {
+        L.circleMarker([w.anchorLat, w.anchorLng], {
+          radius: 8, fillColor: '#3b82f6', color: '#fff', weight: 2, fillOpacity: 1
+        }).addTo(mapInstance)
+          .bindTooltip('Detour waypoint', { permanent: false });
+        boundsPoints.push([w.anchorLat, w.anchorLng]);
+      }
+
+      // Auto-fit bounds
+      if (boundsPoints.length) {
+        mapInstance.fitBounds(L.latLngBounds(boundsPoints), { padding: [30, 30] });
+      }
+
+      // Fix grey tile issue after container becomes visible
+      mapInstance.invalidateSize();
+    }
 
     function setStatus(html, type) {
       statusEl.innerHTML = html;
