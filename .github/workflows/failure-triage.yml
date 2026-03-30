@@ -1,0 +1,93 @@
+name: Failure Triage
+
+on:
+  workflow_run:
+    workflows: ["RVA311 Hazard Pipeline"]
+    types:
+      - completed
+
+jobs:
+  triage:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+      actions: read
+
+    steps:
+      - name: Get failed job logs
+        id: get-logs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = context.payload.workflow_run.id;
+
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id
+            });
+
+            const failedJob = jobs.data.jobs.find(j => j.conclusion === 'failure');
+            if (!failedJob) {
+              core.setOutput('log', 'No failed job found.');
+              core.setOutput('job_name', 'unknown');
+              return;
+            }
+
+            core.setOutput('job_name', failedJob.name);
+
+            const logsResponse = await github.rest.actions.downloadJobLogsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              job_id: failedJob.id
+            });
+
+            const log = logsResponse.data.toString();
+            const truncated = log.length > 8000 ? '...(truncated)\n' + log.slice(-8000) : log;
+            core.setOutput('log', truncated);
+
+      - name: Check for existing triage issue
+        id: check-duplicate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = context.payload.workflow_run.id;
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'triage',
+              state: 'open'
+            });
+            const exists = issues.data.some(i => i.body && i.body.includes(`Run ID: ${run_id}`));
+            core.setOutput('exists', exists ? 'true' : 'false');
+
+      - name: Open triage issue
+        if: steps.check-duplicate.outputs.exists == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = context.payload.workflow_run.id;
+            const workflow_name = context.payload.workflow_run.name;
+            const job_name = '${{ steps.get-logs.outputs.job_name }}';
+            const log = `${{ steps.get-logs.outputs.log }}`;
+            const run_url = context.payload.workflow_run.html_url;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Triage] ${workflow_name} failed — awaiting diagnosis`,
+              labels: ['triage'],
+              body: `## Failure Summary
+            - **Workflow:** ${workflow_name}
+            - **Job:** ${job_name}
+            - **Run ID:** ${run_id}
+            - **Run URL:** ${run_url}
+
+            ## Log Excerpt
+            \`\`\`
+            ${log}
+            \`\`\`
+            `
+            });
