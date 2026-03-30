@@ -204,6 +204,79 @@
     .autocomplete-item.highlighted {
       background: #334155;
     }
+
+    .preview-panel {
+      display: none;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+
+    .preview-panel.visible {
+      display: block;
+    }
+
+    .preview-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+      font-size: 0.88rem;
+    }
+
+    .preview-label {
+      color: #94a3b8;
+    }
+
+    .preview-value {
+      color: #e2e8f0;
+      font-weight: 600;
+    }
+
+    .preview-recommendation {
+      font-size: 0.88rem;
+      margin: 0.75rem 0;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.4rem;
+    }
+
+    .preview-recommendation.green {
+      color: #4ade80;
+      background: rgba(74, 222, 128, 0.08);
+    }
+
+    .preview-recommendation.yellow {
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.08);
+    }
+
+    .preview-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .btn-direct {
+      background: #334155;
+      color: #e2e8f0;
+      padding: 0.75rem 1rem;
+      font-size: 0.95rem;
+      width: 100%;
+    }
+
+    .btn-direct:hover:not(:disabled) {
+      background: #475569;
+    }
+
+    .btn-preview-action {
+      display: block;
+      text-decoration: none;
+      text-align: center;
+      padding: 0.75rem 1rem;
+    }
   </style>
 </head>
 <body>
@@ -232,6 +305,22 @@
     <button class="btn-go" id="goBtn">Get Pothole-Dodging Route</button>
 
     <div class="status" id="status"></div>
+
+    <div class="preview-panel" id="previewPanel">
+      <div class="preview-row">
+        <span class="preview-label">Direct route</span>
+        <span class="preview-value" id="directStats">—</span>
+      </div>
+      <div class="preview-row">
+        <span class="preview-label">Dodging route</span>
+        <span class="preview-value" id="dodgeStats">—</span>
+      </div>
+      <div class="preview-recommendation" id="recommendation"></div>
+      <div class="preview-buttons">
+        <a id="dodgeBtn" class="btn-go btn-preview-action" target="_blank" rel="noopener noreferrer">Open Dodging Route</a>
+        <a id="directBtn" class="btn-direct btn-preview-action" target="_blank" rel="noopener noreferrer">Open Direct Route</a>
+      </div>
+    </div>
   </div>
 
   <p class="footer">Uses OpenStreetMap Nominatim geocoding · No API key required · Open-source</p>
@@ -506,12 +595,22 @@
     const goBtn            = document.getElementById('goBtn');
     const statusEl         = document.getElementById('status');
     const geoStatusEl      = document.getElementById('geoStatus');
+    const previewPanel     = document.getElementById('previewPanel');
+    const directStatsEl    = document.getElementById('directStats');
+    const dodgeStatsEl     = document.getElementById('dodgeStats');
+    const recommendationEl = document.getElementById('recommendation');
+    const dodgeBtnEl       = document.getElementById('dodgeBtn');
+    const directBtnEl      = document.getElementById('directBtn');
 
     // ── Autocomplete ──────────────────────────────────────────────────────────
     const AC_VIEWBOX        = '-77.6,37.4,-77.3,37.65'; // Richmond VA: minLon,minLat,maxLon,maxLat
     const AC_DEBOUNCE_MS    = 300;
     const AC_MIN_CHARS      = 3;
     const AC_BLUR_DELAY_MS  = 150; // allow mousedown on dropdown item to fire before blur closes it
+
+    // ── Route preview thresholds ──────────────────────────────────────────────
+    const MAX_ACCEPTABLE_DETOUR_SECONDS    = 180;  // 3 minutes
+    const MAX_ACCEPTABLE_DETOUR_PERCENTAGE = 0.15; // 15%
 
     function attachAutocomplete(input, dropdownEl) {
       let debounceTimer  = null;
@@ -770,6 +869,28 @@
       return url;
     }
 
+    // ── OSRM route stats ──────────────────────────────────────────────────────
+    async function fetchOsrmRoute(coordPairs) {
+      // coordPairs: array of [lng, lat]
+      const coordStr = coordPairs.map(([lng, lat]) => `${lng},${lat}`).join(';');
+      const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=false&steps=false`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`OSRM request failed (${res.status})`);
+      const data = await res.json();
+      if (!data.routes || !data.routes.length) throw new Error('No OSRM route found');
+      return { duration: data.routes[0].duration, distance: data.routes[0].distance };
+    }
+
+    function formatDuration(seconds) {
+      const m = Math.floor(seconds / 60);
+      const s = Math.round(seconds % 60);
+      return `${m}m ${s}s`;
+    }
+
+    function formatDistance(metres) {
+      return `${(metres / 1609.34).toFixed(1)} mi`;
+    }
+
     // ── Main handler ──────────────────────────────────────────────────────────
     goBtn.addEventListener('click', async () => {
       closeAllDropdowns();
@@ -786,6 +907,7 @@
       }
 
       goBtn.disabled = true;
+      previewPanel.classList.remove('visible');
       setStatus('<span class="spinner"></span>Geocoding addresses…', '');
 
       try {
@@ -799,14 +921,49 @@
         const clusters  = buildClusters();
         const waypoints = selectWaypoints(origin, dest, clusters);
 
-        const url = buildMapsUrl(origin, dest, waypoints);
+        const dodgeMapsUrl   = buildMapsUrl(origin, dest, waypoints);
+        const directMapsUrl  = buildMapsUrl(origin, dest, []);
 
-        const msg = waypoints.length
-          ? `Opening route with ${waypoints.length} pothole-avoidance waypoint${waypoints.length > 1 ? 's' : ''}.`
-          : 'No hazard clusters near this route — opening direct route.';
-        setStatus(msg, 'success');
+        setStatus('<span class="spinner"></span>Fetching route stats…', '');
 
-        window.open(url, '_blank', 'noopener,noreferrer');
+        // Fetch direct and dodging route stats from OSRM in parallel
+        const directCoords = [[origin.lng, origin.lat], [dest.lng, dest.lat]];
+        const dodgeCoords  = waypoints.length
+          ? [
+              [origin.lng, origin.lat],
+              ...waypoints.map(w => [w.anchorLng, w.anchorLat]),
+              [dest.lng, dest.lat]
+            ]
+          : directCoords;
+
+        const [directStats, dodgeStats] = await Promise.all([
+          fetchOsrmRoute(directCoords),
+          fetchOsrmRoute(dodgeCoords)
+        ]);
+
+        // Populate preview panel
+        directStatsEl.textContent = `${formatDuration(directStats.duration)} · ${formatDistance(directStats.distance)}`;
+        dodgeStatsEl.textContent  = `${formatDuration(dodgeStats.duration)} · ${formatDistance(dodgeStats.distance)}`;
+
+        const extraSec  = dodgeStats.duration - directStats.duration;
+        const extraPct  = directStats.duration > 0 ? extraSec / directStats.duration : 0;
+
+        if (!waypoints.length) {
+          recommendationEl.textContent = 'No hazard clusters found — route is already clear';
+          recommendationEl.className   = 'preview-recommendation green';
+        } else if (extraSec > MAX_ACCEPTABLE_DETOUR_SECONDS || extraPct > MAX_ACCEPTABLE_DETOUR_PERCENTAGE) {
+          recommendationEl.textContent = `This detour adds ${formatDuration(extraSec)} — consider taking the direct route`;
+          recommendationEl.className   = 'preview-recommendation yellow';
+        } else {
+          recommendationEl.textContent = `Detour adds only ${formatDuration(extraSec)} to avoid ${waypoints.length} pothole cluster${waypoints.length > 1 ? 's' : ''}`;
+          recommendationEl.className   = 'preview-recommendation green';
+        }
+
+        dodgeBtnEl.href  = dodgeMapsUrl;
+        directBtnEl.href = directMapsUrl;
+
+        setStatus('', '');
+        previewPanel.classList.add('visible');
       } catch (err) {
         setStatus(`Error: ${err.message}`, 'error');
       } finally {
