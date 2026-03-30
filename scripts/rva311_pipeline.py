@@ -19,7 +19,7 @@ def fetch():
     now = datetime.utcnow()
     two_years_ago = now - timedelta(days=730)
 
-    payload = {
+    base_payload = {
         "start": int(two_years_ago.timestamp() * 1000),
         "end": int(now.timestamp() * 1000),
         "services": SERVICE_IDS,
@@ -30,7 +30,6 @@ def fetch():
         ],
         "orderBy": "requestDate",
         "orderDirection": "desc",
-        "pageNumber": 1,
     }
 
     headers = {
@@ -38,22 +37,28 @@ def fetch():
         "Accept": "application/json",
     }
 
-    print("Fetching RVA311 data...")
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    print(f"Fetch complete. Raw response keys: {list(data.keys()) if isinstance(data, dict) else 'list'}")
-    return data
+    all_records = []
+    page = 1
+
+    while True:
+        payload = {**base_payload, "pageNumber": page}
+        print(f"Fetching page {page}...")
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+
+        if not data:
+            print(f"Page {page} returned empty — pagination complete.")
+            break
+
+        all_records.extend(data)
+        print(f"Page {page}: {len(data)} records (running total: {len(all_records)})")
+        page += 1
+
+    return all_records
 
 # --- Step 2: Parse ---
-def parse(raw):
-    if isinstance(raw, list):
-        records = raw
-    elif isinstance(raw, dict):
-        records = raw.get("data") or raw.get("results") or raw.get("requests") or []
-    else:
-        records = []
-
+def parse(records):
     parsed = []
     for r in records:
         lat = r.get("latitude") or r.get("lat")
@@ -96,8 +101,8 @@ def format_urls(records):
 
 # --- Main ---
 def main():
-    raw = fetch()
-    parsed = parse(raw)
+    records = fetch()
+    parsed = parse(records)
 
     if not parsed:
         print("ERROR: No valid records returned from RVA311 API. Failing loudly.")
