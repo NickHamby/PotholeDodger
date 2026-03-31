@@ -30,6 +30,31 @@ export async function fetchOsrmRoute(coordPairs) {
   }
 }
 
+// ── OSRM route with street-name extraction ────────────────────────────────��───
+export async function fetchOsrmRouteWithSteps(coordPairs) {
+  // coordPairs: array of [lng, lat]
+  // Returns { duration, distance, streetNames: Set<string> } or null on failure.
+  try {
+    const coordStr = coordPairs.map(([lng, lat]) => `${lng},${lat}`).join(';');
+    const url = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=false&steps=true`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.routes || !data.routes.length) return null;
+    const route = data.routes[0];
+    const streetNames = new Set();
+    for (const leg of route.legs) {
+      for (const step of leg.steps) {
+        const name = (step.name || '').trim().toLowerCase();
+        if (name) streetNames.add(name);
+      }
+    }
+    return { duration: route.duration, distance: route.distance, streetNames };
+  } catch {
+    return null;
+  }
+}
+
 export function formatDuration(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
