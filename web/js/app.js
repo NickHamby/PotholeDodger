@@ -1,6 +1,6 @@
-import { buildClusters, selectWaypoints } from './hazards.js';
+import { buildClusters, selectWaypoints, filterHazardsByStreetNames } from './hazards.js';
 import { geocode, attachAutocomplete } from './geocode.js';
-import { fetchOsrmRoute, formatDuration, formatDistance, buildMapsUrl } from './routing.js';
+import { fetchOsrmRoute, fetchOsrmRouteWithSteps, formatDuration, formatDistance, buildMapsUrl } from './routing.js';
 import { renderHazardMap } from './map.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -94,19 +94,30 @@ goBtn.addEventListener('click', async () => {
       return;
     }
 
-    setStatus('<span class="spinner"></span>Computing route…', '');
+    setStatus('<span class="spinner"></span>Fetching route…', '');
 
+    const directCoords = [[origin.lng, origin.lat], [dest.lng, dest.lat]];
+
+    // Step 1: fetch direct route with steps to extract street names
+    const directStats = await fetchOsrmRouteWithSteps(directCoords);
+
+    setStatus('<span class="spinner"></span>Computing hazard-aware detour…', '');
+
+    // Step 2: filter clusters to streets on this route
     const clusters  = buildClusters();
-    const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, clusters);
+    const streetNames = directStats?.streetNames ?? null;
+    const filteredClusters = await filterHazardsByStreetNames(streetNames, clusters);
+
+    // Step 3: select waypoints from filtered clusters
+    const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, filteredClusters);
 
     const dodgeMapsUrl   = buildMapsUrl(origin, dest, waypoints);
     const directMapsUrl  = buildMapsUrl(origin, dest, []);
 
-    setStatus('<span class="spinner"></span>Fetching route stats…', '');
+    setStatus('<span class="spinner"></span>Fetching dodge route stats…', '');
 
-    // Fetch direct and dodging route stats from OSRM in parallel (best-effort)
-    const directCoords = [[origin.lng, origin.lat], [dest.lng, dest.lat]];
-    const dodgeCoords  = waypoints.length
+    // Step 4: fetch dodge route stats (no steps needed)
+    const dodgeCoords = waypoints.length
       ? [
           [origin.lng, origin.lat],
           ...waypoints.map(w => [w.anchorLng, w.anchorLat]),
@@ -114,10 +125,7 @@ goBtn.addEventListener('click', async () => {
         ]
       : directCoords;
 
-    const [directStats, dodgeStats] = await Promise.all([
-      fetchOsrmRoute(directCoords),
-      fetchOsrmRoute(dodgeCoords)
-    ]);
+    const dodgeStats = await fetchOsrmRoute(dodgeCoords);
 
     // Populate preview panel — handle unavailable OSRM stats gracefully
     if (directStats && dodgeStats) {
