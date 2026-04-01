@@ -70,7 +70,7 @@ export function attachAutocomplete(input, dropdownEl) {
       abortCtrl = new AbortController();
       const signal = abortCtrl.signal;
       try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&bounded=1` +
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&bounded=0` +
           `&viewbox=${AC_VIEWBOX}&q=${encodeURIComponent(q)}`;
         const res = await fetch(url, {
           signal,
