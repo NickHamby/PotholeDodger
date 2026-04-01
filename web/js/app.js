@@ -1,6 +1,6 @@
-import { buildClusters, selectWaypoints, filterHazardsByStreetNames } from './hazards.js';
+import { buildClusters, selectWaypoints } from './hazards.js';
 import { geocode, attachAutocomplete } from './geocode.js';
-import { fetchOsrmRoute, fetchOsrmRouteWithSteps, formatDuration, formatDistance, buildMapsUrl } from './routing.js';
+import { fetchOsrmRoute, formatDuration, formatDistance, buildMapsUrl } from './routing.js';
 import { renderHazardMap } from './map.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -97,26 +97,19 @@ goBtn.addEventListener('click', async () => {
     setStatus('<span class="spinner"></span>Fetching route…', '');
 
     const directCoords = [[origin.lng, origin.lat], [dest.lng, dest.lat]];
-
-    // Step 1: fetch direct route with steps to extract street names
-    const directStats = await fetchOsrmRouteWithSteps(directCoords);
+    const directStats = await fetchOsrmRoute(directCoords);
 
     setStatus('<span class="spinner"></span>Computing hazard-aware detour…', '');
 
-    // Step 2: filter clusters to streets on this route
-    const clusters  = buildClusters();
-    const streetNames = directStats?.streetNames ?? null;
-    const filteredClusters = await filterHazardsByStreetNames(streetNames, clusters);
-
-    // Step 3: select waypoints from filtered clusters
-    const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, filteredClusters);
+    const clusters = buildClusters();
+    const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, clusters);
 
     const dodgeMapsUrl   = buildMapsUrl(origin, dest, waypoints);
     const directMapsUrl  = buildMapsUrl(origin, dest, []);
 
     setStatus('<span class="spinner"></span>Fetching dodge route stats…', '');
 
-    // Step 4: fetch dodge route stats (no steps needed)
+    // Fetch dodge route stats (no steps needed)
     const dodgeCoords = waypoints.length
       ? [
           [origin.lng, origin.lat],
