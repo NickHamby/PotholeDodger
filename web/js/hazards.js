@@ -248,7 +248,7 @@ const HAZARDS = [
       [37.5371556115,-77.4523684157],[37.5505455635,-77.4932938814],[37.5737444381,-77.4854407087],
       [37.5536491217,-77.4911383912],[37.5649936837,-77.4416945595],[37.559997,-77.4855135],
       [37.5347554817,-77.4350237533],[37.508193,-77.5157895],[37.5572668541,-77.482391037],
-      [37.558044,-77.4390555],[37.562247,-77.4674595],[37.521145581,-77.5243070908],[
+      [37.558044,-77.4390555],[37.562247,-77.4674595],[37.521145581,-77.5243070908],
       [37.5409141764,-77.4407683499],[37.5214832389,-77.4777397676],[37.5600756575,-77.4333277345],
       [37.547700519,-77.4412187934],[37.5337429198,-77.4327132156],[37.5331055746,-77.4327347986],
       [37.5491303643,-77.4714543298],[37.559044318,-77.4745990451],[37.544454,-77.4490995],
@@ -260,78 +260,122 @@ const HAZARDS = [
       [37.5682999726,-77.5034530833],[37.5639056944,-77.5128723308],[37.5576976953,-77.4566691103]
     ];
 
-// ── Street-name filter ────────────────────────────────────────────────────────
-// MAX_WAYPOINTS caps how many individual hazard coords we pass to Google Maps
-const MAX_WAYPOINTS = 8;
+    // ── Clustering ────────────────────────────────────────────────────────────
+    const CELL_SIZE = 0.005; // ~550 m (latitude); ~400 m (longitude at 37.5°N)
+    const MIN_CLUSTER = 3;
 
-/**
- * filterHazardsByStreetNames
- * Reverse-geocodes each hazard via Nominatim and keeps only those whose road
- * name matches one of the street names used by the OSRM route.
- *
- * streetNames — Set<string> of normalised (trimmed, lowercased) road names
- * Returns     — array of { lat, lng } objects for matching hazards
- */
-export async function filterHazardsByStreetNames(streetNames) {
-  if (!streetNames || streetNames.size === 0) return [];
-
-  const matched = [];
-  // Nominatim rate-limit: max 1 req/s — process sequentially with a small delay
-  for (const [lat, lng] of HAZARDS) {
-    try {
-      const url =
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
-        `&lat=${lat}&lon=${lng}&zoom=17&addressdetails=0`;
-      const res = await fetch(url, {
-        headers: { 'Accept-Language': 'en' }
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const road = (data.name || data.address?.road || '').trim().toLowerCase();
-      if (road && streetNames.has(road)) {
-        matched.push({ lat, lng });
+    function buildClusters() {
+      const cells = {};
+      for (const [lat, lng] of HAZARDS) {
+        const key = `${Math.floor(lat / CELL_SIZE)},${Math.floor(lng / CELL_SIZE)}`;
+        if (!cells[key]) cells[key] = { lats: [], lngs: [] };
+        cells[key].lats.push(lat);
+        cells[key].lngs.push(lng);
       }
-    } catch {
-      // skip on network error — best-effort
+      return Object.values(cells)
+        .filter(c => c.lats.length >= MIN_CLUSTER)
+        .map(c => {
+          const count = c.lats.length;
+          const lat = c.lats.reduce((a, b) => a + b, 0) / count;
+          const lng = c.lngs.reduce((a, b) => a + b, 0) / count;
+          return { lat, lng, count };
+        })
+        .sort((a, b) => b.count - a.count);
     }
-    // ~1 req/s to respect Nominatim usage policy
-    await new Promise(r => setTimeout(r, 1050));
-  }
-  return matched;
-}
 
+    // ── Waypoint selection ────────────────────────────────────────────────────
+    const CORRIDOR_HALF  = 0.010;  // ~1.1 km — tighter corridor
+    const T_MIN          = 0.05;
+    const T_MAX          = 0.95;
+    const MAX_WAYPOINTS  = 3;       // never more than 3
+    const DETOUR_PUSH    = 0.004;   // ~440 m nudge, not a yank
+    const MIN_DENSITY    = 5;       // ignore sparse clusters
+    const T_GAP          = 0.08;    // min t-spacing between waypoints
+
+    function selectWaypoints(origin, dest, clusters) {
+      const dLat = dest.lat - origin.lat;
+      const dLng = dest.lng - origin.lng;
+      const routeLen2 = dLat * dLat + dLng * dLng;
+      const routeLen  = Math.sqrt(routeLen2);
+
+      // clusters already sorted by density descending from buildClusters()
+      const accepted        = [];
+      const dodgedClusters  = []; // clusters that produced waypoints
+      const skipped         = []; // in corridor but filtered out
+
+      for (const cluster of clusters) {
+        const cLat = cluster.lat - origin.lat;
+        const cLng = cluster.lng - origin.lng;
+
+        const t = (cLat * dLat + cLng * dLng) / routeLen2;
+        if (t < T_MIN || t > T_MAX) continue;
+
+        const cross       = dLat * cLng - dLng * cLat;
+        const perpDist    = cross / routeLen;
+        const absPerpDist = Math.abs(perpDist);
+        if (absPerpDist > CORRIDOR_HALF) continue;
+
+        // Cluster is in the corridor — now check filter conditions
+        // Note: we intentionally do not break on MIN_DENSITY because clusters below the
+        // threshold are still collected as "skipped" for the hazard map visualisation.
+        if (accepted.length >= MAX_WAYPOINTS || cluster.count < MIN_DENSITY) {
+          skipped.push(cluster);
+          continue;
+        }
+
+        // Skip if too close in t to an already-accepted waypoint
+        if (accepted.some(a => Math.abs(a.t - t) < T_GAP)) {
+          skipped.push(cluster);
+          continue;
+        }
+
+        const sign        = perpDist >= 0 ? -1 : 1;
+        const perpUnitLat = -dLng / routeLen;
+        const perpUnitLng =  dLat / routeLen;
+
+        const anchorLat = origin.lat + t * dLat + sign * DETOUR_PUSH * perpUnitLat;
+        const anchorLng = origin.lng + t * dLng + sign * DETOUR_PUSH * perpUnitLng;
+
+        accepted.push({ t, anchorLat, anchorLng, count: cluster.count });
+        dodgedClusters.push(cluster);
+      }
+
+      // Sort accepted by t so waypoints are in route order
+      accepted.sort((a, b) => a.t - b.t);
+      return { waypoints: accepted, dodgedClusters, skippedClusters: skipped };
+    }
+
+
+// ── Street-name filter ────────────────────────────────────────────────────────
 /**
- * selectWaypointsFromHazards
- * Given a filtered array of { lat, lng } hazard points and the origin/dest,
- * projects each onto the straight-line route vector, sorts by projection
- * parameter t, and picks up to MAX_WAYPOINTS evenly spaced along the route.
- *
- * Each returned waypoint has { anchorLat, anchorLng } — the hazard coord
- * itself (no nudge needed; Google Maps will route around it naturally).
+ * Filters clusters to those lying on streets that are part of the OSRM route.
+ * Uses Nominatim reverse-geocode to find each cluster's nearest street name.
+ * Falls back to all clusters when streetNames is null or empty.
+ * @param {Set<string>|null} streetNames  - lowercased street names from OSRM steps
+ * @param {Array}            clusters     - output of buildClusters()
+ * @returns {Promise<Array>} filtered (or original) cluster array
  */
-export function selectWaypointsFromHazards(origin, dest, hazards) {
-  if (!hazards.length) return [];
+async function filterHazardsByStreetNames(streetNames, clusters) {
+  if (!streetNames || streetNames.size === 0) return clusters;
 
-  const dLat = dest.lat - origin.lat;
-  const dLng = dest.lng - origin.lng;
-  const routeLen2 = dLat * dLat + dLng * dLng;
-
-  // Project each hazard onto the route line, keep t in (0,1)
-  const projected = hazards
-    .map(({ lat, lng }) => {
-      const t = ((lat - origin.lat) * dLat + (lng - origin.lng) * dLng) / routeLen2;
-      return { anchorLat: lat, anchorLng: lng, t };
+  const results = await Promise.all(
+    clusters.map(async (cluster) => {
+      try {
+        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${cluster.lat}&lon=${cluster.lng}&zoom=17`;
+        const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        if (!res.ok) return cluster; // keep on failure
+        const data = await res.json();
+        const road = (data.address?.road || '').trim().toLowerCase();
+        return streetNames.has(road) ? cluster : null;
+      } catch {
+        return cluster; // keep on failure
+      }
     })
-    .filter(({ t }) => t > 0.02 && t < 0.98)
-    .sort((a, b) => a.t - b.t);
-
-  if (projected.length <= MAX_WAYPOINTS) return projected;
-
-  // Subsample evenly when we have more than MAX_WAYPOINTS
-  const step = (projected.length - 1) / (MAX_WAYPOINTS - 1);
-  return Array.from({ length: MAX_WAYPOINTS }, (_, i) =>
-    projected[Math.round(i * step)]
   );
+
+  const filtered = results.filter(Boolean);
+  // If nothing matched (route uses unnamed roads, etc.) fall back to all
+  return filtered.length > 0 ? filtered : clusters;
 }
 
-export { HAZARDS };
+export { buildClusters, selectWaypoints, filterHazardsByStreetNames };
