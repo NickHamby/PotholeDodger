@@ -1,0 +1,250 @@
+name: PR Fix Loop
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  models: read
+
+jobs:
+  maybe-fix:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request != null
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Evaluate and act
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+          import sys
+          import re
+
+          try:
+              GH_TOKEN      = os.environ["GH_TOKEN"]
+              REPO          = os.environ["REPO"]
+              PR_NUMBER     = os.environ["PR_NUMBER"]
+              COMMENT_BODY  = os.environ["COMMENT_BODY"]
+              PR_AUTHOR     = os.environ["PR_AUTHOR"]
+
+              # ── 3b. Guard: only act on review bot CHANGES REQUESTED comments ──
+              if "## \U0001f916 PotholeDodger PR Review" not in COMMENT_BODY:
+                  print("Skipping: guard condition not met (missing review signature)")
+                  sys.exit(0)
+
+              if "**CHANGES REQUESTED**" not in COMMENT_BODY:
+                  print("Skipping: guard condition not met (no CHANGES REQUESTED verdict)")
+                  sys.exit(0)
+
+              if PR_AUTHOR != "Copilot":
+                  print(
+                      f"Skipping: guard condition not met "
+                      f"(PR author is '{PR_AUTHOR}', not 'Copilot')"
+                  )
+                  sys.exit(0)
+
+              # ── Helpers ────────────────────────────────────────────────────────
+              def gh_request(method, path, body=None):
+                  url = f"https://api.github.com{path}"
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(
+                      url,
+                      data=data,
+                      method=method,
+                      headers={
+                          "Authorization": f"Bearer {GH_TOKEN}",
+                          "Accept": "application/vnd.github+json",
+                          "Content-Type": "application/json",
+                          "X-GitHub-Api-Version": "2022-11-28",
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req) as resp:
+                          return resp.status, json.loads(resp.read())
+                  except urllib.error.HTTPError as e:
+                      return e.code, {}
+
+              # ── 3c. Read PR labels to determine attempt count ──────────────────
+              status, labels = gh_request(
+                  "GET", f"/repos/{REPO}/issues/{PR_NUMBER}/labels"
+              )
+              label_names = (
+                  [lbl.get("name", "") for lbl in labels]
+                  if isinstance(labels, list)
+                  else []
+              )
+
+              current_attempt = 0
+              for n in (3, 2, 1):
+                  if f"pothole-fix-attempt-{n}" in label_names:
+                      current_attempt = n
+                      break
+
+              # ── 3d. Strike 3 ───────────────────────────────────────────────────
+              if current_attempt >= 3:
+                  fail_lines = [
+                      line for line in COMMENT_BODY.splitlines()
+                      if "\u274c FAIL" in line
+                  ]
+                  failures_text = (
+                      "\n".join(fail_lines) if fail_lines else COMMENT_BODY
+                  )
+                  warning_body = (
+                      "\u26d4 3 automated fix attempts have failed for this change. "
+                      "Manual review required.\n\n"
+                      "**Failures from last automated review:**\n\n"
+                      f"{failures_text}"
+                  )
+                  gh_request(
+                      "POST",
+                      f"/repos/{REPO}/issues/{PR_NUMBER}/comments",
+                      {"body": warning_body},
+                  )
+                  print("Strike 3: posted manual-review warning and exiting.")
+                  sys.exit(0)
+
+              # ── 3e. Create and apply the next attempt label ────────────────────
+              next_attempt = current_attempt + 1
+              label_name = f"pothole-fix-attempt-{next_attempt}"
+
+              st, _ = gh_request(
+                  "POST",
+                  f"/repos/{REPO}/labels",
+                  {"name": label_name, "color": "e4e669"},
+              )
+              if st not in (201, 422):
+                  print(
+                      f"Warning: unexpected status {st} "
+                      f"when creating label '{label_name}'"
+                  )
+
+              gh_request(
+                  "POST",
+                  f"/repos/{REPO}/issues/{PR_NUMBER}/labels",
+                  {"labels": [label_name]},
+              )
+
+              # ── 3f. Extract failures from the review comment ───────────────────
+              fail_lines = []
+              lines = COMMENT_BODY.splitlines()
+              i = 0
+              while i < len(lines):
+                  line = lines[i]
+                  if "\u274c FAIL" in line:
+                      fail_lines.append(line)
+                      # Collect following explanation paragraph until blank line
+                      i += 1
+                      while i < len(lines) and lines[i].strip():
+                          fail_lines.append(lines[i])
+                          i += 1
+                      fail_lines.append("")  # blank separator
+                  else:
+                      i += 1
+
+              extracted_failures = (
+                  "\n".join(fail_lines).strip() if fail_lines else COMMENT_BODY.strip()
+              )
+
+              # ── 3g. Create a new GitHub Issue ──────────────────────────────────
+              issue_body = (
+                  "## Context\n\n"
+                  "This issue was automatically created by the PotholeDodger PR fix loop.\n\n"
+                  f"- **Original PR:** #{PR_NUMBER}\n"
+                  f"- **Attempt:** {next_attempt} of 3\n"
+                  "- **Trigger:** Automated review posted `CHANGES REQUESTED`\n\n"
+                  "---\n\n"
+                  "## Failures to fix\n\n"
+                  f"{extracted_failures}\n\n"
+                  "---\n\n"
+                  "## Instructions for the coding agent\n\n"
+                  f"1. Read the failures listed above carefully.\n"
+                  f"2. Check out the branch from PR #{PR_NUMBER}.\n"
+                  "3. Fix only the specific issues listed — do not make unrelated changes.\n"
+                  "4. Do not modify `web/js/`, `web/index.html`, or "
+                  "`.github/workflows/` unless a failure explicitly requires it.\n"
+                  "5. Open a new PR targeting `main` with the fixes applied.\n"
+                  '6. The new PR description must reference this issue: '
+                  '"Fixes #ISSUE_NUMBER_PLACEHOLDER"\n\n'
+                  "## Key rules\n"
+                  "- Never set `User-Agent` in browser `fetch()` calls\n"
+                  "- OSRM functions must return `null` on failure, never throw\n"
+                  "- All exported names must match their import names exactly across all files\n"
+                  "- Follow camelCase naming conventions"
+              )
+
+              issue_title = (
+                  f"[Auto-fix attempt {next_attempt}/3] "
+                  f"Fix failures flagged on PR #{PR_NUMBER}"
+              )
+
+              st, issue_data = gh_request(
+                  "POST",
+                  f"/repos/{REPO}/issues",
+                  {"title": issue_title, "body": issue_body},
+              )
+
+              if st != 201 or not isinstance(issue_data, dict):
+                  print(f"Error: failed to create issue (status {st})")
+                  sys.exit(0)
+
+              issue_number = issue_data.get("number")
+              print(f"Created issue #{issue_number}: {issue_title}")
+
+              # Patch the issue body to embed the real issue number
+              updated_body = issue_body.replace(
+                  "ISSUE_NUMBER_PLACEHOLDER", str(issue_number)
+              )
+              gh_request(
+                  "PATCH",
+                  f"/repos/{REPO}/issues/{issue_number}",
+                  {"body": updated_body},
+              )
+
+              # Assign Copilot to the issue
+              gh_request(
+                  "POST",
+                  f"/repos/{REPO}/issues/{issue_number}/assignees",
+                  {"assignees": ["Copilot"]},
+              )
+
+              # ── 3h. Close the original PR with a comment ───────────────────────
+              close_comment = (
+                  f"\U0001f504 Automated review found failures (attempt {next_attempt}/3).\n\n"
+                  f"A fix has been requested in issue #{issue_number}. "
+                  "The Copilot coding agent will open a new PR with the corrections applied.\n\n"
+                  "This PR has been closed automatically and will be superseded by the fix PR."
+              )
+              gh_request(
+                  "POST",
+                  f"/repos/{REPO}/issues/{PR_NUMBER}/comments",
+                  {"body": close_comment},
+              )
+
+              gh_request(
+                  "PATCH",
+                  f"/repos/{REPO}/pulls/{PR_NUMBER}",
+                  {"state": "closed"},
+              )
+
+              print(f"Closed PR #{PR_NUMBER} and created fix issue #{issue_number}.")
+
+          except Exception as exc:
+              print(f"Unexpected error: {exc}")
+              sys.exit(0)
+          PYEOF
