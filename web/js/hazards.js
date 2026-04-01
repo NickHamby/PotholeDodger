@@ -264,7 +264,7 @@ const HAZARDS = [
     const CELL_SIZE = 0.005; // ~550 m (latitude); ~400 m (longitude at 37.5°N)
     const MIN_CLUSTER = 3;
 
-    function buildClusters() {
+    export function buildClusters() {
       const cells = {};
       for (const [lat, lng] of HAZARDS) {
         const key = `${Math.floor(lat / CELL_SIZE)},${Math.floor(lng / CELL_SIZE)}`;
@@ -292,7 +292,7 @@ const HAZARDS = [
     const MIN_DENSITY    = 5;       // ignore sparse clusters
     const T_GAP          = 0.08;    // min t-spacing between waypoints
 
-    function selectWaypoints(origin, dest, clusters) {
+    export function selectWaypoints(origin, dest, clusters) {
       const dLat = dest.lat - origin.lat;
       const dLng = dest.lng - origin.lng;
       const routeLen2 = dLat * dLat + dLng * dLng;
