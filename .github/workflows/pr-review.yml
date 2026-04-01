@@ -1,0 +1,221 @@
+name: PR Review Agent
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  models: read
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+
+      - name: Read source files
+        run: |
+          {
+            echo 'HAZARDS_JS<<DELIM_HAZARDS'
+            cat web/js/hazards.js
+            echo 'DELIM_HAZARDS'
+          } >> "$GITHUB_ENV"
+          {
+            echo 'ROUTING_JS<<DELIM_ROUTING'
+            cat web/js/routing.js
+            echo 'DELIM_ROUTING'
+          } >> "$GITHUB_ENV"
+          {
+            echo 'APP_JS<<DELIM_APP'
+            cat web/js/app.js
+            echo 'DELIM_APP'
+          } >> "$GITHUB_ENV"
+          {
+            echo 'GEOCODE_JS<<DELIM_GEOCODE'
+            cat web/js/geocode.js
+            echo 'DELIM_GEOCODE'
+          } >> "$GITHUB_ENV"
+          {
+            echo 'MAP_JS<<DELIM_MAP'
+            cat web/js/map.js
+            echo 'DELIM_MAP'
+          } >> "$GITHUB_ENV"
+
+      - name: Call GitHub Models API and post review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HAZARDS_JS: ${{ env.HAZARDS_JS }}
+          ROUTING_JS: ${{ env.ROUTING_JS }}
+          APP_JS: ${{ env.APP_JS }}
+          GEOCODE_JS: ${{ env.GEOCODE_JS }}
+          MAP_JS: ${{ env.MAP_JS }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import json
+          import urllib.request
+          import sys
+
+          GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+          PR_NUMBER = os.environ["PR_NUMBER"]
+          REPO = os.environ["REPO"]
+
+          hazards_js = os.environ.get("HAZARDS_JS", "")
+          routing_js = os.environ.get("ROUTING_JS", "")
+          app_js = os.environ.get("APP_JS", "")
+          geocode_js = os.environ.get("GEOCODE_JS", "")
+          map_js = os.environ.get("MAP_JS", "")
+
+          try:
+              with open("pr.diff", "r", encoding="utf-8") as f:
+                  diff = f.read()
+          except Exception as e:
+              print(f"Failed to read pr.diff: {e}", file=sys.stderr)
+              diff = "(diff unavailable)"
+
+          system_prompt = (
+              "You are a product owner and code consistency reviewer for the PotholeDodger project"
+              " \u2014 a client-side vanilla JS ES module web app. Your job is to review PR diffs for"
+              " breaking changes and consistency issues before they reach the developer.\n\n"
+              "The project's key source files are provided for reference. Review the diff against them."
+          )
+
+          user_prompt = "\n".join([
+              "Review this pull request diff for the PotholeDodger project.",
+              "",
+              "## Source files (ground truth \u2014 current state of main)",
+              "",
+              "### web/js/hazards.js",
+              hazards_js,
+              "",
+              "### web/js/routing.js",
+              routing_js,
+              "",
+              "### web/js/app.js",
+              app_js,
+              "",
+              "### web/js/geocode.js",
+              geocode_js,
+              "",
+              "### web/js/map.js",
+              map_js,
+              "",
+              "## PR Diff",
+              diff,
+              "",
+              "## Your review checklist",
+              "",
+              "Evaluate each item and respond with \u2705 PASS, \u274c FAIL, or \u26a0\ufe0f N/A (not applicable to this diff).",
+              "",
+              "For each FAIL, explain what the specific problem is and where it occurs (file + line if possible).",
+              "",
+              "1. **Export/import consistency** \u2014 Are all exported function/variable names in modified files"
+              " consistent with how they are imported in consumer files (especially app.js)?"
+              " Flag any renamed exports that aren't updated everywhere.",
+              "",
+              "2. **No-touch zones** \u2014 The following files should NOT be modified unless the PR description"
+              " explicitly states why: `web/js/hazards.js`, `web/js/routing.js`, `web/js/geocode.js`,"
+              " `web/js/map.js`, `web/js/app.js`, `web/index.html`,"
+              " `.github/workflows/rva311-pipeline.yml`, `.github/workflows/test.yml`."
+              " Flag any modifications to these files.",
+              "",
+              "3. **Function signature stability** \u2014 If any function signatures changed"
+              " (parameters added/removed/renamed), are all call sites updated to match?",
+              "",
+              "4. **Naming conventions** \u2014 Do new functions and variables follow the existing"
+              " camelCase naming pattern used in the codebase?",
+              "",
+              "5. **OSRM null-safety** \u2014 Any code that calls `fetchOsrmRoute` or"
+              " `fetchOsrmRouteWithSteps` must handle a `null` return value gracefully."
+              " Flag any new call sites that assume a non-null result.",
+              "",
+              "6. **Forbidden fetch header** \u2014 `User-Agent` must never be set in browser"
+              " `fetch()` calls. Flag any new `fetch()` calls that set a `User-Agent` header.",
+              "",
+              "7. **Test coverage** \u2014 If any exported function in `web/js/` was modified or added,"
+              " do the unit tests in `tests/unit/` reflect that change?",
+              "",
+              "## Response format",
+              "",
+              "Start with a one-sentence summary of the PR's purpose (inferred from the diff).",
+              "",
+              "Then list each checklist item numbered 1\u20137 with its status and explanation.",
+              "",
+              "End with an overall verdict: **APPROVED** (all pass or N/A),"
+              " **NEEDS REVIEW** (one or more warnings),"
+              " or **CHANGES REQUESTED** (one or more failures).",
+          ])
+
+          FALLBACK_COMMENT = (
+              "## \U0001f916 PotholeDodger PR Review\n\n"
+              "\u26a0\ufe0f Automated review could not complete (model API unavailable)."
+              " Please review manually."
+          )
+
+          def post_comment(body):
+              url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
+              payload = json.dumps({"body": body}).encode("utf-8")
+              req = urllib.request.Request(
+                  url,
+                  data=payload,
+                  headers={
+                      "Authorization": f"Bearer {GITHUB_TOKEN}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      print(f"Comment posted: HTTP {resp.status}")
+              except Exception as e:
+                  print(f"Failed to post comment: {e}", file=sys.stderr)
+
+          try:
+              api_url = "https://models.inference.ai.azure.com/chat/completions"
+              request_body = json.dumps({
+                  "model": "gpt-4o",
+                  "temperature": 0.1,
+                  "messages": [
+                      {"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_prompt},
+                  ],
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  api_url,
+                  data=request_body,
+                  headers={
+                      "Authorization": f"Bearer {GITHUB_TOKEN}",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  if resp.status != 200:
+                      raise ValueError(f"Model API returned HTTP {resp.status}")
+                  result = json.loads(resp.read().decode("utf-8"))
+
+              model_response = result["choices"][0]["message"]["content"]
+              comment_body = f"## \U0001f916 PotholeDodger PR Review\n\n{model_response}"
+              post_comment(comment_body)
+
+          except Exception as e:
+              print(f"Model API call failed: {e}", file=sys.stderr)
+              post_comment(FALLBACK_COMMENT)
+
+          sys.exit(0)
+          PYEOF
