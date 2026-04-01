@@ -345,4 +345,37 @@ const HAZARDS = [
       return { waypoints: accepted, dodgedClusters, skippedClusters: skipped };
     }
 
-export { buildClusters, selectWaypoints };
+
+// ── Street-name filter ────────────────────────────────────────────────────────
+/**
+ * Filters clusters to those lying on streets that are part of the OSRM route.
+ * Uses Nominatim reverse-geocode to find each cluster's nearest street name.
+ * Falls back to all clusters when streetNames is null or empty.
+ * @param {Set<string>|null} streetNames  - lowercased street names from OSRM steps
+ * @param {Array}            clusters     - output of buildClusters()
+ * @returns {Promise<Array>} filtered (or original) cluster array
+ */
+async function filterHazardsByStreetNames(streetNames, clusters) {
+  if (!streetNames || streetNames.size === 0) return clusters;
+
+  const results = await Promise.all(
+    clusters.map(async (cluster) => {
+      try {
+        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${cluster.lat}&lon=${cluster.lng}&zoom=17`;
+        const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        if (!res.ok) return cluster; // keep on failure
+        const data = await res.json();
+        const road = (data.address?.road || '').trim().toLowerCase();
+        return streetNames.has(road) ? cluster : null;
+      } catch {
+        return cluster; // keep on failure
+      }
+    })
+  );
+
+  const filtered = results.filter(Boolean);
+  // If nothing matched (route uses unnamed roads, etc.) fall back to all
+  return filtered.length > 0 ? filtered : clusters;
+}
+
+export { buildClusters, selectWaypoints, filterHazardsByStreetNames };
