@@ -2,6 +2,7 @@ import { buildClusters, selectWaypoints, filterHazardsByStreetNames } from './ha
 import { geocode, attachAutocomplete } from './geocode.js';
 import { fetchOsrmRoute, fetchOsrmRouteWithSteps, formatDuration, formatDistance, buildMapsUrl } from './routing.js';
 import { renderHazardMap } from './map.js';
+import { debugLog, debugClear } from './debug.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const originInput      = document.getElementById('origin');
@@ -77,19 +78,24 @@ goBtn.addEventListener('click', async () => {
 
   goBtn.disabled = true;
   previewPanel.classList.remove('visible');
+  debugClear();
   setStatus('<span class="spinner"></span>Geocoding addresses…', '');
 
   try {
     let origin, dest;
     try {
       origin = await geocode(originAddr);
+      debugLog('geocode:origin', origin);
     } catch {
+      debugLog('geocode:origin', null);
       setStatus('Could not find origin address — try being more specific.', 'error');
       return;
     }
     try {
       dest = await geocode(destAddr);
+      debugLog('geocode:dest', dest);
     } catch {
+      debugLog('geocode:dest', null);
       setStatus('Could not find destination address — try being more specific.', 'error');
       return;
     }
@@ -100,18 +106,23 @@ goBtn.addEventListener('click', async () => {
 
     // Step 1: fetch direct route with steps to extract street names
     const directStats = await fetchOsrmRouteWithSteps(directCoords);
+    debugLog('osrm:route', directStats);
 
     setStatus('<span class="spinner"></span>Computing hazard-aware detour…', '');
 
     // Step 2: filter clusters to streets on this route
     const clusters  = buildClusters();
+    debugLog('hazards:clusters', clusters);
     const streetNames = directStats?.streetNames ?? null;
     const filteredClusters = await filterHazardsByStreetNames(streetNames, clusters);
+    debugLog('hazards:filtered', filteredClusters);
 
     // Step 3: select waypoints from filtered clusters
     const { waypoints, dodgedClusters, skippedClusters } = selectWaypoints(origin, dest, filteredClusters);
+    debugLog('hazards:waypoints', waypoints);
 
     const dodgeMapsUrl   = buildMapsUrl(origin, dest, waypoints);
+    debugLog('maps:url', dodgeMapsUrl);
     const directMapsUrl  = buildMapsUrl(origin, dest, []);
 
     setStatus('<span class="spinner"></span>Fetching dodge route stats…', '');
